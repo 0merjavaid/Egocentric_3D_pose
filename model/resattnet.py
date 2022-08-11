@@ -1,6 +1,7 @@
-from .resnet import ResNet, BasicBlock, Bottleneck
+from pytorchcv.model_provider import get_model
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
 
 
 class DoubleConv(nn.Module):
@@ -22,33 +23,17 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
     
-class HMEncoder(ResNet):
+class HMEncoder(nn.Module):
     def __init__(self, backbone="resnet50", pretrained=True):
-        if backbone == "resnet18":
-            block = BasicBlock
-            layers = [2, 2, 2, 2]
-            
-        elif backbone == "resnet34":
-            block = BasicBlock
-            layers = [3, 4, 6, 3]
-        elif backbone =="resnet50":
-            block = Bottleneck
-            layers = [3, 4, 6, 3]
-        else:
-            raise NotImplementedError
-            
-        super().__init__(block, layers)
+        super().__init__()
+        model = get_model("resattnet56", pretrained=False)
+        path = """https://github.com/phamquiluan/ResidualAttentionNetwork/releases/download/v0.1.0/resattnet56.pth"""
+        state = torch.hub.load_state_dict_from_url(path)
+        model.load_state_dict(state["state_dict"])
+        self.model = nn.Sequential(*list(model.features.children())[:-1])
     
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x = self.model(x)
         return x
     
 
@@ -85,19 +70,26 @@ class Regressor(nn.Module):
         self.fc2 = nn.Linear(2048, 512)
         self.fc3 = nn.Linear(512, 50)
         
+        self.FC_mean  = nn.Linear(50, 50)
+        self.FC_var   = nn.Linear (50, 50)
+        
         self.pose_fc1 = nn.Linear(50, 32)
         self.pose_fc2 = nn.Linear(32, 32)
         self.pose_fc3 = nn.Linear(32, joints * 3)
-        
-#         self.rotation_fc1 = nn.Linear(50, 32)
-#         self.rotation_fc2 = nn.Linear(32, 32)
-#         self.rotation_fc3 = nn.Linear(32, joints * 3)
         
         self.hm_fc1 = nn.Linear(50, 512)
         self.hm_fc2 = nn.Linear(512, 2048)
         self.hm_fc3 = nn.Linear(2048, 18432)
         
         self.hm_decoder = HMDecoder(128, out_channels=joints)
+    
+    def reparameterization(self, mean, var):
+        std = var.mul(0.5).exp_()
+#         eps = Variable(std.data.new(std.size()).normal_())
+#         mean = mean.repeat(21,1,1)
+        eps = torch.rand((std.shape[0], std.shape[-1])).cuda()
+        z = (eps * std) + mean
+        return z
     
     def forward(self, x):
         x = self.conv1(x)
@@ -110,20 +102,24 @@ class Regressor(nn.Module):
         x = self.l_relu(self.fc2(x))
         x = self.l_relu(self.fc3(x))
         
-        pose = self.l_relu(self.pose_fc1(x))
+        mean = self.FC_mean(x)
+        var = self.FC_var(x)
+        z = self.reparameterization(mean, torch.exp(0.5 * var))
+        poses = []
+
+        pose = self.l_relu(self.pose_fc1(z))
         pose = self.l_relu(self.pose_fc2(pose))
         pose = self.l_relu(self.pose_fc3(pose))
-        
-#         rotation = self.l_relu(self.rotation_fc1(x))
-#         rotation = self.l_relu(self.rotation_fc2(rotation))
-#         rotation = self.rotation_fc3(rotation)
-        
-        hm = self.l_relu(self.hm_fc1(x))
+
+
+        hm = self.l_relu(self.hm_fc1(z))
         hm = self.l_relu(self.hm_fc2(hm))
         hm = self.l_relu(self.hm_fc3(hm))
         hm = hm.view(hm.size(0),128,12,12)
         hm = self.hm_decoder(hm)
-        return pose, hm#, rotation
+
+    #             break
+        return pose, hm, mean, var
         
 class SelfPose(nn.Module):
     def __init__(self, backbone="resnet50", pretrained=True, feature_size=2048, joints=6):
@@ -135,8 +131,18 @@ class SelfPose(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         hm = self.decoder(x)
-        pose, pred_hm = self.regressor(hm)
+        pose, pred_hm, mean, var = self.regressor(hm)
         
-        return pose, hm, pred_hm
+        return pose, hm, pred_hm, mean, var
+    
+    
+if __name__ == "__main__":
+    model = SelfPose()
+    im = torch.zeros((1,3,384,384))
+    model(im)
+    
+    
+    
+    
         
     

@@ -202,7 +202,7 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
-        self.regression_head = nn.Linear(1024, 18)
+        self.regression_head = nn.Linear(512, 18)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -413,6 +413,8 @@ def wide_resnet101_2(pretrained: bool = False, progress: bool = True, **kwargs: 
 
 if __name__ == "__main__":
     model = resnet18()
+    print(model)
     image = torch.zeros((2, 3, 224,224))
-    depth = torch.zeros((2, 3, 224, 224))
-    model(image)
+#     depth = torch.zeros((2, 3, 224, 224))
+    pred = model(image)
+    print(pred.shape)

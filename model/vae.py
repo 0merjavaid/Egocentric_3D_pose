@@ -1,6 +1,7 @@
 from .resnet import ResNet, BasicBlock, Bottleneck
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
 
 
 class DoubleConv(nn.Module):
@@ -85,19 +86,28 @@ class Regressor(nn.Module):
         self.fc2 = nn.Linear(2048, 512)
         self.fc3 = nn.Linear(512, 50)
         
+        self.FC_mean  = nn.Linear(50, 50)
+        self.FC_var   = nn.Linear (50, 50)
+        
         self.pose_fc1 = nn.Linear(50, 32)
         self.pose_fc2 = nn.Linear(32, 32)
         self.pose_fc3 = nn.Linear(32, joints * 3)
-        
-#         self.rotation_fc1 = nn.Linear(50, 32)
-#         self.rotation_fc2 = nn.Linear(32, 32)
-#         self.rotation_fc3 = nn.Linear(32, joints * 3)
         
         self.hm_fc1 = nn.Linear(50, 512)
         self.hm_fc2 = nn.Linear(512, 2048)
         self.hm_fc3 = nn.Linear(2048, 18432)
         
         self.hm_decoder = HMDecoder(128, out_channels=joints)
+    
+    def reparameterization(self, mean, var):
+        std = var.mul(0.5).exp_()
+#         std = std.repeat(20,1,1)
+#         eps = Variable(std.data.new(std.size()))#.normal_(0,1))
+        eps = torch.rand((var.shape[0], 50)).cuda()        # sampling epsilon       
+        z = mean + var * eps                          # reparameterization trick
+#         z = mean.repeat(21,1,1)
+#         z[:-1] += eps * std
+        return z
     
     def forward(self, x):
         x = self.conv1(x)
@@ -110,20 +120,24 @@ class Regressor(nn.Module):
         x = self.l_relu(self.fc2(x))
         x = self.l_relu(self.fc3(x))
         
-        pose = self.l_relu(self.pose_fc1(x))
+        mean = self.FC_mean(x)
+        var = self.FC_var(x)
+        z = self.reparameterization(mean, torch.exp(0.5 * var))
+        poses = []
+#         for i in range(z.shape[0]):
+        pose = self.l_relu(self.pose_fc1(z))
         pose = self.l_relu(self.pose_fc2(pose))
         pose = self.l_relu(self.pose_fc3(pose))
-        
-#         rotation = self.l_relu(self.rotation_fc1(x))
-#         rotation = self.l_relu(self.rotation_fc2(rotation))
-#         rotation = self.rotation_fc3(rotation)
-        
-        hm = self.l_relu(self.hm_fc1(x))
+
+
+        hm = self.l_relu(self.hm_fc1(z))
         hm = self.l_relu(self.hm_fc2(hm))
         hm = self.l_relu(self.hm_fc3(hm))
         hm = hm.view(hm.size(0),128,12,12)
         hm = self.hm_decoder(hm)
-        return pose, hm#, rotation
+#             poses.append(pose)
+    #             break
+        return pose, hm, mean, var
         
 class SelfPose(nn.Module):
     def __init__(self, backbone="resnet50", pretrained=True, feature_size=2048, joints=6):
@@ -135,8 +149,18 @@ class SelfPose(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         hm = self.decoder(x)
-        pose, pred_hm = self.regressor(hm)
+        pose, pred_hm, mean, var = self.regressor(hm)
         
-        return pose, hm, pred_hm
+        return pose, hm, pred_hm, mean, var
+    
+    
+if __name__ == "__main__":
+    model = SelfPose()
+    im = torch.zeros((1,3,368,368))
+    model(im)
+    
+    
+    
+    
         
     

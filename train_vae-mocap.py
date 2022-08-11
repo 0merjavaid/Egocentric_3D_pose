@@ -1,6 +1,5 @@
 # %matplotlib notebook
-from model.self_pose import SelfPose
-from dataloader import XRegoDataset 
+from model.vae import SelfPose
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
@@ -60,7 +59,7 @@ seq = iaa.Sequential(
 ) 
 
 preproc = transforms.Compose([
-#     transforms.Resize((368,368)),
+
     transforms.ToTensor(),
 #     normalize,
 ])
@@ -120,7 +119,7 @@ def transform3D(x):
     x = np.array(x).astype(float).reshape(-1,3)
     x = np.concatenate((x[14:17], x[22:25]))
 
-    return x.reshape(-1) / 300
+    return x.reshape(-1) / 2000
 
 def transform2D(x):
     x = x.decode("utf-8").split(",")
@@ -148,16 +147,17 @@ def pil_decode(data, augment=False):
 
 
 def decode_train(sample):
-    return decode_sample(sample, augment=True)
+    return decode_sample(sample, augment=False)
 
 def decode_valid(sample):
     return decode_sample(sample, augment=False)
 
+
 def decode_sample(sample, augment=False):
-    pose_img = pil_decode(sample["pose_image.png"], augment)
-    pose_3dp = transform3D(sample["pose_3dp.csv"])
+    pose_img = pil_decode(sample["pose_image.jpg"], augment)
+    pose_3dp = transform3D(sample["pose_pose3d.csv"])
     width, height = pose_img.size
-    points = transform2D(sample["pose_2dp.csv"])
+    points = transform2D(sample["pose_pose2d.csv"])
     pose_img = preproc(pose_img)
     heatmaps = get_heatmap(points, (height, width))
 
@@ -167,16 +167,17 @@ def decode_sample(sample, augment=False):
         heatmaps=heatmaps,
     )
 
-train_url = glob.glob("/egopose-data/web-datasets/xr*train*tar")
 
-test_url = glob.glob("/egopose-data/web-datasets/xr*val*tar")
+train_url = glob.glob("/egopose-data/web-datasets/mo*train*tar")
+
+test_url = glob.glob("/egopose-data/web-datasets/mo*test*tar")
 print(len(train_url))
 print(len(test_url))
 ds = wds.WebDataset(train_url).shuffle(1000, initial=1000,handler=ignore_and_continue).map(decode_train, handler=ignore_and_continue).to_tuple("image", "pose",  "heatmaps")
 train_loader = torch.utils.data.DataLoader(ds.batched(12), num_workers=4, batch_size=None)
 
-ds_valid = wds.WebDataset(test_url).shuffle(1000, initial=10).map(decode_valid, handler=ignore_and_continue).to_tuple("image", "pose", "heatmaps", handler=ignore_and_continue)
-valid_loader = torch.utils.data.DataLoader(ds_valid, num_workers=4, batch_size=8)
+ds_valid = wds.WebDataset(test_url).shuffle(1000, initial=1000).map(decode_valid, handler=ignore_and_continue).to_tuple("image", "pose", "heatmaps", handler=ignore_and_continue)
+valid_loader = torch.utils.data.DataLoader(ds_valid, num_workers=4, batch_size=12)
 
 model = SelfPose()
 dataloaders = {"train": train_loader, "val": valid_loader}
@@ -185,11 +186,11 @@ hmp_loss = nn.MSELoss()
 hmp_loss2 = nn.MSELoss()
 l1_loss = nn.L1Loss()
 cos_sim = nn.CosineSimilarity(dim=2, eps=1e-6)
-optimizer_ft = optim.Adam(model.parameters(), lr=0.0001) 
+optimizer_ft = optim.Adam(model.parameters(), lr=0.00009) 
 scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=1, gamma=0.95)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model.to(device)
-logging.basicConfig(filename="./train_logs/model_5.log", format='%(message)s',
+logging.basicConfig(filename="./train_logs/mo2cap2_vae.log", format='%(message)s',
                     level=logging.INFO, filemode='w')
 logger = logging.getLogger('train_logger')
 print("loaded", device)
@@ -203,12 +204,11 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = float('inf')
 
-    for epoch in range(num_epochs):
+    for epoch in range(5, num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
-
         # Each epoch has a training and validation phase
-        for phase in ['train', 'val']:
+        for phase in ['train']:
             if phase == 'train':
                 model.train()  # Set model to training mode
             else:
@@ -219,20 +219,20 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
             sizes = {"train":0, "val":0}
             i = 0
             for image, gt_pose, gt_hm in dataloaders[phase]:
-
                 image = image.to(device).float()
                 gt_pose = gt_pose.to(device).float()
                 gt_hm = gt_hm.to(device).float()
-#                 print(labels)
-#                 depth = depth.to(device).float()
-
+                
                 # zero the parameter gradients
                 optimizer.zero_grad()
 
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    pred_pose, hm, pred_hm = model(image)
+
+                    pred_pose, hm, pred_hm, mean, var = model(image)
+#                     logger.info(f"{image.shape}, {torch.max(pre_pose)}")
+                    KLD =  torch.mean(-0.5 * torch.sum(1 + var - mean ** 2 - var.exp(), dim = 1), dim = 0)
                     pred_pose = pred_pose.view(-1,6,3)
                     gt_pose = gt_pose.view(-1,6,3)
 #                     _, preds = torch.max(outputs, 1)
@@ -242,10 +242,9 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
                     hmp_loss = heatmap_loss(hm, gt_hm)
                     hmp_emb_loss = heatmap_loss2(pred_hm, hm)
 
-                    loss = p_loss + (hmp_loss/50) + (hmp_emb_loss/50) #+ (l1_loss_pose) + (0.1*cosine_loss)
+                    loss = p_loss + (hmp_loss/50) + (hmp_emb_loss/50) # KLD / 200+ (l1_loss_pose) + (0.1*cosine_loss)
                     # backward + optimize only if in training phase
-                    if phase == 'train':
-
+                    if phase == 'train' and not torch.isnan(loss):
                         loss.backward()
                         optimizer.step()
 
@@ -254,11 +253,11 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
                 sizes[phase] += image.size(0)
                 if i % 10 == 0:
                     logger.info(f"Epoch: {epoch} Phase {phase}: loss = {loss.item()} Step = {i}")
-                    logger.info(f"l2 pose {p_loss.item()} hmp loss {hmp_loss.item()} hmp2 {hmp_emb_loss.item()} LR: {scheduler.get_last_lr()}")# "l1 loss",l1_loss_pose.item(), "cos loss",cosine_loss.item())
+                    logger.info(f"l2 pose {p_loss.item()} hmp loss {hmp_loss.item()} hmp2 {hmp_emb_loss.item()}, KLD: {KLD} LR: {scheduler.get_last_lr()}")# "l1 loss",l1_loss_pose.item(), "cos loss",cosine_loss.item())
                 i += 1
-                if i == 15000:
-                    torch.save(model.state_dict(), f"./ckpts/model5/{i}th iteration.pth")
 #                 running_corrects += torch.sum(preds == labels.data)
+            if i == 15000:
+                    torch.save(model.state_dict(), f"./ckpts/model5/{i}th iteration.pth")
             if phase == 'train':
                 scheduler.step()
             epoch_loss = running_loss / sizes[phase]
@@ -267,10 +266,8 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
             print('{} Loss: {:.4f}'.format(
                 phase, epoch_loss))
             
- 
-
         print()
-        torch.save(model.state_dict(), f"./ckpts/model5/{epoch}_epoch_{epoch_loss}.pth")
+        torch.save(model.state_dict(), f"./ckpts/mo2cap2_vae/{epoch}_epoch_{epoch_loss}.pth")
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
@@ -282,6 +279,6 @@ def train_model(model, pose_loss, heatmap_loss, heatmap_loss2,l1_loss,
 #     model.load_state_dict(best_model_wts)
     return model
 
-# model.load_state_dict(torch.load("./ckpts/33000th iteration.pth"))
+# model.load_state_dict(torch.load("./ckpts/mo2cap2_vae/2_epoch_0.0002188772070699345.pth"))
 
-best = train_model(model, pose_criterion, hmp_loss, hmp_loss2, l1_loss, cos_sim, optimizer_ft, scheduler, 7)
+best = train_model(model, pose_criterion, hmp_loss, hmp_loss2, l1_loss, cos_sim, optimizer_ft, scheduler, 18)
