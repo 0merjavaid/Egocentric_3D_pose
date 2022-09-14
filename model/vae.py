@@ -102,7 +102,7 @@ class Regressor(nn.Module):
     def reparameterization(self, mean, var):
         std = var.mul(0.5).exp_()
 #         std = std.repeat(20,1,1)
-#         eps = Variable(std.data.new(std.size()))#.normal_(0,1))
+#         eps = Variable(std.data.new(std.size())).normal_(0,3)
         eps = torch.rand((var.shape[0], 50)).cuda()        # sampling epsilon       
         z = mean + var * eps                          # reparameterization trick
 #         z = mean.repeat(21,1,1)
@@ -124,19 +124,19 @@ class Regressor(nn.Module):
         var = self.FC_var(x)
         z = self.reparameterization(mean, torch.exp(0.5 * var))
         poses = []
-#         for i in range(z.shape[0]):
-        pose = self.l_relu(self.pose_fc1(z))
-        pose = self.l_relu(self.pose_fc2(pose))
-        pose = self.l_relu(self.pose_fc3(pose))
+        for i in range(z.shape[0]):
+            pose = self.l_relu(self.pose_fc1(z))
+            pose = self.l_relu(self.pose_fc2(pose))
+            pose = self.l_relu(self.pose_fc3(pose))
 
 
-        hm = self.l_relu(self.hm_fc1(z))
-        hm = self.l_relu(self.hm_fc2(hm))
-        hm = self.l_relu(self.hm_fc3(hm))
-        hm = hm.view(hm.size(0),128,12,12)
-        hm = self.hm_decoder(hm)
+            hm = self.l_relu(self.hm_fc1(z))
+            hm = self.l_relu(self.hm_fc2(hm))
+            hm = self.l_relu(self.hm_fc3(hm))
+            hm = hm.view(hm.size(0),128,12,12)
+            hm = self.hm_decoder(hm)
 #             poses.append(pose)
-    #             break
+            break
         return pose, hm, mean, var
         
 class SelfPose(nn.Module):
